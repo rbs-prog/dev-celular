@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon.svg">
+<title>Bloco de Notas</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #fff; font-family: system-ui, sans-serif; }
+  #bar { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #ddd; background: #f6f6f6; align-items: center; }
+  #bar button { font-size: 16px; padding: 8px 14px; border: 1px solid #bbb; border-radius: 8px; background: #fff; }
+  #bar button.on { background: #222; color: #fff; border-color: #222; }
+  #bar .sp { flex: 1; }
+  #scroller { position: absolute; top: 57px; left: 0; right: 0; bottom: 0; overflow-y: auto; overscroll-behavior: contain; }
+  #page { position: relative; width: 100%; }
+  #text { display: block; width: 100%; border: 0; outline: 0; resize: none; overflow: hidden;
+          padding: 16px; font-size: 20px; line-height: 32px; background: transparent; color: #111; font-family: inherit; }
+  #ink { position: absolute; top: 0; left: 0; touch-action: none; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="btnPen" class="on">✏️ Caneta</button>
+  <button id="btnEraser">🧽 Borracha</button>
+  <span class="sp"></span>
+  <button id="btnClear">Limpar desenho</button>
+</div>
+<div id="scroller">
+  <div id="page">
+    <textarea id="text" placeholder="Digite aqui e desenhe por cima com a S Pen…" spellcheck="false"></textarea>
+    <canvas id="ink"></canvas>
+  </div>
+</div>
+<script>
+const KEY = 'bloco-notas-v1';
+const $ = id => document.getElementById(id);
+const scroller = $('scroller'), page = $('page'), text = $('text'), canvas = $('ink');
+const ctx = canvas.getContext('2d');
+
+let strokes = [];          // {w: largura base, pts: [[x, y, pressao], ...]}
+let tool = 'pen';
+let current = null;        // traço em andamento
+let saveTimer;
+
+// ---------- persistência ----------
+function save() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { localStorage.setItem(KEY, JSON.stringify({ text: text.value, strokes })); } catch (e) {}
+  }, 300);
+}
+function load() {
+  try {
+    const d = JSON.parse(localStorage.getItem(KEY) || 'null');
+    if (d) { text.value = d.text || ''; strokes = d.strokes || []; }
+  } catch (e) {}
+}
+
+// ---------- layout ----------
+function layout() {
+  text.style.height = 'auto';
+  const h = Math.max(text.scrollHeight, scroller.clientHeight) + 400; // sobra para desenhar abaixo do texto
+  text.style.height = h + 'px';
+  const w = page.clientWidth, dpr = window.devicePixelRatio || 1;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redraw();
+}
+function drawStroke(s) {
+  const p = s.pts;
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#1a3cff';
+  if (p.length === 1) {
+    ctx.beginPath(); ctx.arc(p[0][0], p[0][1], s.w * (0.5 + p[0][2]) / 2, 0, 7); ctx.fillStyle = '#1a3cff'; ctx.fill(); return;
+  }
+  for (let i = 1; i < p.length; i++) {
+    ctx.lineWidth = s.w * (0.4 + p[i][2] * 1.2);
+    ctx.beginPath(); ctx.moveTo(p[i-1][0], p[i-1][1]); ctx.lineTo(p[i][0], p[i][1]); ctx.stroke();
+  }
+}
+function redraw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  strokes.forEach(drawStroke);
+}
+
+// ---------- caneta / borracha ----------
+const pos = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+function eraseAt(x, y) {
+  const R = 14, before = strokes.length;
+  strokes = strokes.filter(s => !s.pts.some(p => Math.hypot(p[0]-x, p[1]-y) < R));
+  if (strokes.length !== before) { redraw(); save(); }
+}
+const isEraser = e => tool === 'eraser' || (e.buttons & 32) || (e.button === 5); // botão de borracha / lateral
+
+let touch = null; // gesto de dedo: rolar a página ou tocar para digitar
+canvas.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
+    canvas.setPointerCapture(e.pointerId);
+    const [x, y] = pos(e);
+    if (isEraser(e)) { current = { erase: true }; eraseAt(x, y); return; }
+    current = { w: 2.2, pts: [[x, y, e.pressure || 0.5]] };
+    strokes.push(current);
+    redraw();
+  } else {
+    canvas.setPointerCapture(e.pointerId);
+    touch = { y: e.clientY, x: e.clientX, moved: false };
+  }
+});
+canvas.addEventListener('pointermove', e => {
+  if (current && (e.pointerType === 'pen' || e.pointerType === 'mouse')) {
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ev of (evs.length ? evs : [e])) {
+      const [x, y] = pos(ev);
+      if (current.erase) eraseAt(x, y);
+      else current.pts.push([x, y, ev.pressure || 0.5]);
+    }
+    if (!current.erase) redraw();
+  } else if (touch) {
+    const dy = e.clientY - touch.y;
+    if (Math.abs(dy) > 4 || Math.abs(e.clientX - touch.x) > 4) touch.moved = true;
+    scroller.scrollTop -= dy; touch.y = e.clientY;
+  }
+});
+function end(e) {
+  if (current) { if (!current.erase) save(); current = null; }
+  if (touch) {
+    if (!touch.moved) text.focus(); // toque de dedo = digitar
+    touch = null;
+  }
+}
+canvas.addEventListener('pointerup', end);
+canvas.addEventListener('pointercancel', end);
+
+// ---------- UI ----------
+function setTool(t) {
+  tool = t;
+  $('btnPen').classList.toggle('on', t === 'pen');
+  $('btnEraser').classList.toggle('on', t === 'eraser');
+}
+$('btnPen').onclick = () => setTool('pen');
+$('btnEraser').onclick = () => setTool('eraser');
+$('btnClear').onclick = () => { if (confirm('Apagar todo o desenho?')) { strokes = []; redraw(); save(); } };
+text.addEventListener('input', () => { layout(); save(); });
+window.addEventListener('resize', layout);
+if ('visualViewport' in window) visualViewport.addEventListener('resize', () => {
+  scroller.style.bottom = (window.innerHeight - visualViewport.height) + 'px'; // acima do teclado
+});
+
+load(); layout();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
