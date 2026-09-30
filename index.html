@@ -10,29 +10,36 @@
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #fff; font-family: system-ui, sans-serif; }
-  #bar { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid #ddd; background: #f6f6f6; align-items: center; }
-  #bar button { font-size: 16px; padding: 8px 14px; border: 1px solid #bbb; border-radius: 8px; background: #fff; }
+  body { display: flex; flex-direction: column; }
+  #bar { flex: none; display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid #ddd; background: #f6f6f6; align-items: center; overflow-x: auto; }
+  #bar button { flex: none; font-size: 15px; padding: 8px 10px; border: 1px solid #bbb; border-radius: 8px; background: #fff; white-space: nowrap; }
   #bar button.on { background: #222; color: #fff; border-color: #222; }
   #bar .sp { flex: 1; }
-  #scroller { position: absolute; top: 57px; left: 0; right: 0; bottom: 0; overflow-y: auto; overscroll-behavior: contain; }
+  #scroller { flex: 1; min-height: 0; position: relative; overflow-y: auto; overscroll-behavior: contain; }
   #page { position: relative; width: 100%; }
   .tb { position: absolute; max-width: calc(100% - 8px); border: 1px dashed transparent; outline: 0; resize: none; overflow: hidden;
         padding: 4px 8px; font-size: 20px; line-height: 32px; background: transparent; color: #111; font-family: inherit; }
   .tb:focus { border-color: #9ab; background: rgba(255, 250, 190, .3); }
+  .grip { position: absolute; width: 30px; height: 22px; line-height: 22px; text-align: center; font-size: 16px; color: #567;
+          background: #e6ecf2; border-radius: 6px 6px 0 0; pointer-events: none; user-select: none; }
   #ink { position: absolute; top: 0; left: 0; touch-action: none; }
+  #laser { position: absolute; top: 0; left: 0; pointer-events: none; }
 </style>
 </head>
 <body>
 <div id="bar">
   <button id="btnPen" class="on">✏️ Caneta</button>
+  <button id="btnMarker">🖍️ Marca-texto</button>
+  <button id="btnLaser">🔴 Laser</button>
   <button id="btnEraser">🧽 Borracha</button>
   <button id="btnKb">🔤 Texto</button>
   <span class="sp"></span>
-  <button id="btnClear">Limpar desenho</button>
+  <button id="btnClear">Limpar</button>
 </div>
 <div id="scroller">
   <div id="page">
     <canvas id="ink"></canvas>
+    <canvas id="laser"></canvas>
   </div>
 </div>
 <script>
@@ -40,10 +47,15 @@ const KEY = 'bloco-notas-v1';
 const $ = id => document.getElementById(id);
 const scroller = $('scroller'), page = $('page'), canvas = $('ink');
 const ctx = canvas.getContext('2d');
+const laserCv = $('laser'), lctx = laserCv.getContext('2d');
 
 let boxes = [];            // caixas de texto {x, y, w, text}
 const els = new Map();     // caixa -> <textarea>
-let strokes = [];          // {w: largura base, pts: [[x, y, pressao], ...]}
+const grips = new Map();   // caixa -> alça de arrastar
+const GRIP_H = 22;
+let strokes = [];          // {kind: 'pen'|'marker', w: largura base, pts: [[x, y, pressao], ...]}
+let lasers = [];           // pontos do laser [x, y, tempo]; não são salvos
+let drag = null;           // arrasto de caixa {b, dx, dy}
 let tool = 'pen';
 let current = null;        // traço em andamento
 let saveTimer;
@@ -60,8 +72,8 @@ function load() {
     const d = JSON.parse(localStorage.getItem(KEY) || 'null');
     if (d) {
       strokes = d.strokes || [];
-      boxes = d.boxes || [];
-      if (d.text) boxes.unshift({ x: 8, y: 8, w: Math.max(120, page.clientWidth - 16), text: d.text }); // nota da versão antiga
+      boxes = (d.boxes || []).map(b => ({ ...b, y: Math.max(GRIP_H, b.y) }));
+      if (d.text) boxes.unshift({ x: 8, y: GRIP_H, w: Math.max(120, page.clientWidth - 16), text: d.text }); // nota da versão antiga
     }
   } catch (e) {}
 }
@@ -74,11 +86,13 @@ function layout() {
   const w = page.clientWidth, dpr = window.devicePixelRatio || 1;
   page.style.height = h + 'px';
   if (canvas.style.height === h + 'px' && canvas.style.width === w + 'px') return;
-  canvas.style.width = w + 'px';
-  canvas.style.height = h + 'px';
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const [cv, c] of [[canvas, ctx], [laserCv, lctx]]) {
+    cv.style.width = w + 'px';
+    cv.style.height = h + 'px';
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
   redraw();
 }
 
@@ -89,15 +103,29 @@ function focusBox(ta) {
   ta.blur(); ta.focus();
   ta.setSelectionRange(ta.value.length, ta.value.length);
 }
+function placeBox(b) {
+  const ta = els.get(b), g = grips.get(b);
+  ta.style.left = b.x + 'px'; ta.style.top = b.y + 'px'; ta.style.width = b.w + 'px';
+  g.style.left = b.x + 'px'; g.style.top = (b.y - GRIP_H) + 'px';
+}
+function gripAt(e) {
+  for (const [b, g] of grips) {
+    const r = g.getBoundingClientRect();
+    if (e.clientX >= r.left - 10 && e.clientX <= r.right + 10 && e.clientY >= r.top - 10 && e.clientY <= r.bottom + 6) return b;
+  }
+  return null;
+}
 function addBox(b, focus) {
   const ta = document.createElement('textarea');
   ta.className = 'tb'; ta.rows = 1; ta.spellcheck = false; ta.value = b.text || '';
-  ta.style.left = b.x + 'px'; ta.style.top = b.y + 'px'; ta.style.width = b.w + 'px';
-  page.insertBefore(ta, canvas);
-  els.set(b, ta);
+  const g = document.createElement('div');
+  g.className = 'grip'; g.textContent = '⠿';
+  page.insertBefore(g, canvas); page.insertBefore(ta, canvas);
+  els.set(b, ta); grips.set(b, g);
+  placeBox(b);
   ta.addEventListener('input', () => { b.text = ta.value; fit(ta); layout(); save(); });
   ta.addEventListener('blur', () => {
-    if (!ta.value.trim()) { ta.remove(); els.delete(b); boxes = boxes.filter(x => x !== b); layout(); }
+    if (!ta.value.trim()) { ta.remove(); grips.get(b).remove(); els.delete(b); grips.delete(b); boxes = boxes.filter(x => x !== b); layout(); }
     save();
   });
   fit(ta);
@@ -106,7 +134,7 @@ function addBox(b, focus) {
 function newBoxAt(x, y) {
   const pw = page.clientWidth;
   const bx = Math.max(8, Math.min(x, pw - 128));
-  const b = { x: bx, y: Math.max(0, y - 16), w: Math.min(320, pw - bx - 8), text: '' };
+  const b = { x: bx, y: Math.max(GRIP_H, y - 16), w: Math.min(320, pw - bx - 8), text: '' };
   boxes.push(b);
   addBox(b, true);
   layout();
@@ -124,6 +152,15 @@ function tapAt(e) {
 function drawStroke(s) {
   const p = s.pts;
   ctx.lineCap = ctx.lineJoin = 'round';
+  if (s.kind === 'marker') { // traço único e uniforme: a transparência não escurece nas emendas
+    ctx.strokeStyle = 'rgba(255, 224, 0, 0.42)';
+    ctx.lineWidth = s.w; ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+    if (p.length === 1) ctx.lineTo(p[0][0] + 0.1, p[0][1]);
+    ctx.stroke();
+    return;
+  }
   ctx.strokeStyle = '#1a3cff';
   if (p.length === 1) {
     ctx.beginPath(); ctx.arc(p[0][0], p[0][1], s.w * (0.5 + p[0][2]) / 2, 0, 7); ctx.fillStyle = '#1a3cff'; ctx.fill(); return;
@@ -138,6 +175,30 @@ function redraw() {
   strokes.forEach(drawStroke);
 }
 
+// ---------- laser (some sozinho) ----------
+const LASER_MS = 1800;
+let laserRaf = 0;
+function laserFrame() {
+  const now = performance.now();
+  lasers = lasers.filter(l => now - l.t < LASER_MS);
+  lctx.clearRect(0, 0, laserCv.width, laserCv.height);
+  lctx.lineCap = lctx.lineJoin = 'round';
+  lctx.shadowColor = 'rgba(255, 0, 0, .9)'; lctx.shadowBlur = 10; lctx.strokeStyle = '#ff2a2a'; lctx.lineWidth = 5;
+  for (let i = 1; i < lasers.length; i++) {
+    const a = lasers[i - 1], b = lasers[i];
+    if (b.brk) continue; // início de um novo traço
+    lctx.globalAlpha = Math.max(0, 1 - (now - b.t) / LASER_MS);
+    lctx.beginPath(); lctx.moveTo(a.x, a.y); lctx.lineTo(b.x, b.y); lctx.stroke();
+  }
+  lctx.globalAlpha = 1;
+  laserRaf = lasers.length ? requestAnimationFrame(laserFrame) : 0;
+  if (!lasers.length) lctx.clearRect(0, 0, laserCv.width, laserCv.height);
+}
+function laserPoint(x, y, brk) {
+  lasers.push({ x, y, t: performance.now(), brk });
+  if (!laserRaf) laserRaf = requestAnimationFrame(laserFrame);
+}
+
 // ---------- caneta / borracha ----------
 const pos = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
 function eraseAt(x, y) {
@@ -150,27 +211,37 @@ const isEraser = e => tool === 'eraser' || (e.buttons & 32) || (e.button === 5);
 let touch = null; // gesto de dedo: rolar a página ou tocar para digitar
 canvas.addEventListener('pointerdown', e => {
   e.preventDefault(); // evita o mousedown de compatibilidade, que tira o foco da caixa recém-criada
+  canvas.setPointerCapture(e.pointerId);
+  const [x, y] = pos(e);
+  const gb = gripAt(e); // alça de uma caixa: arrasta com dedo, caneta ou mouse
+  if (gb) { drag = { b: gb, dx: x - gb.x, dy: y - gb.y }; return; }
   if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
-    canvas.setPointerCapture(e.pointerId);
-    const [x, y] = pos(e);
     if (isEraser(e)) { current = { erase: true }; eraseAt(x, y); return; }
-    current = { w: 2.2, pts: [[x, y, e.pressure || 0.5]] };
+    if (tool === 'laser') { current = { laser: true }; laserPoint(x, y, true); return; }
+    current = tool === 'marker'
+      ? { kind: 'marker', w: 18, pts: [[x, y, 0.5]] }
+      : { kind: 'pen', w: 2.2, pts: [[x, y, e.pressure || 0.5]] };
     strokes.push(current);
     redraw();
   } else {
-    canvas.setPointerCapture(e.pointerId);
     touch = { y: e.clientY, x: e.clientX, moved: false };
   }
 });
 canvas.addEventListener('pointermove', e => {
-  if (current && (e.pointerType === 'pen' || e.pointerType === 'mouse')) {
+  if (drag) {
+    const [x, y] = pos(e);
+    drag.b.x = Math.max(0, Math.min(x - drag.dx, page.clientWidth - 60));
+    drag.b.y = Math.max(GRIP_H, y - drag.dy);
+    placeBox(drag.b); layout();
+  } else if (current && (e.pointerType === 'pen' || e.pointerType === 'mouse')) {
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     for (const ev of (evs.length ? evs : [e])) {
       const [x, y] = pos(ev);
       if (current.erase) eraseAt(x, y);
-      else current.pts.push([x, y, ev.pressure || 0.5]);
+      else if (current.laser) laserPoint(x, y, false);
+      else current.pts.push([x, y, current.kind === 'marker' ? 0.5 : (ev.pressure || 0.5)]);
     }
-    if (!current.erase) redraw();
+    if (current.pts) redraw();
   } else if (touch) {
     const dy = e.clientY - touch.y;
     if (Math.abs(dy) > 10 || Math.abs(e.clientX - touch.x) > 10) touch.moved = true;
@@ -178,7 +249,8 @@ canvas.addEventListener('pointermove', e => {
   }
 });
 function end(e) {
-  if (current) { if (!current.erase) save(); current = null; }
+  if (drag) { drag = null; save(); }
+  if (current) { if (current.pts) save(); current = null; }
   if (touch) {
     if (!touch.moved) tapAt(e); // toque de dedo = digitar (caixa existente ou nova)
     touch = null;
@@ -188,18 +260,17 @@ canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 
 // ---------- UI ----------
+const TOOLS = { pen: 'btnPen', marker: 'btnMarker', laser: 'btnLaser', eraser: 'btnEraser' };
 function setTool(t) {
   tool = t;
-  $('btnPen').classList.toggle('on', t === 'pen');
-  $('btnEraser').classList.toggle('on', t === 'eraser');
+  for (const k in TOOLS) $(TOOLS[k]).classList.toggle('on', k === t);
 }
-$('btnPen').onclick = () => setTool('pen');
-$('btnEraser').onclick = () => setTool('eraser');
+for (const k in TOOLS) $(TOOLS[k]).onclick = () => setTool(k);
 $('btnKb').onclick = () => newBoxAt(16, scroller.scrollTop + 32);
-$('btnClear').onclick = () => { if (confirm('Apagar todo o desenho?')) { strokes = []; redraw(); save(); } };
+$('btnClear').onclick = () => { if (confirm('Apagar todos os desenhos? (o texto fica)')) { strokes = []; redraw(); save(); } };
 window.addEventListener('resize', layout);
 if ('visualViewport' in window) visualViewport.addEventListener('resize', () => {
-  scroller.style.bottom = (window.innerHeight - visualViewport.height) + 'px'; // acima do teclado
+  document.body.style.height = visualViewport.height + 'px'; // área útil acima do teclado
 });
 
 load(); boxes.forEach(b => addBox(b, false)); layout();
