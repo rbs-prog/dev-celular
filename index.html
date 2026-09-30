@@ -22,7 +22,32 @@
   .tb:focus { border-color: #9ab; background: rgba(255, 250, 190, .3); }
   .grip { position: absolute; width: 30px; height: 22px; line-height: 22px; text-align: center; font-size: 16px; color: #567;
           background: #e6ecf2; border-radius: 6px 6px 0 0; pointer-events: none; user-select: none; }
+  #stage { position: relative; width: 100%; }
   #ink { position: absolute; top: 0; left: 0; touch-action: none; }
+  #bar button:disabled { opacity: .4; }
+  .tb.sel { outline: 2px solid #1a73e8; background: rgba(26, 115, 232, .08); }
+  #selRect { position: absolute; display: none; pointer-events: none; border: 2px dashed #1a73e8; background: rgba(26, 115, 232, .10); }
+  #selBar { position: absolute; display: none; gap: 6px; padding: 6px; background: #fff; border: 1px solid #bbb; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+  #selBar button { font-size: 14px; padding: 8px 10px; border: 1px solid #bbb; border-radius: 8px; background: #fff; white-space: nowrap; }
+  body.viewer #selBar, body.viewer #selRect { display: none !important; }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20; background: #222; color: #fff; padding: 10px 16px;
+           border-radius: 20px; font-size: 15px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; text-align: center; }
+  #toast.show { opacity: .95; }
+  #btnLive.wait { background: #f0a500; border-color: #f0a500; color: #000; }
+  #btnLive.live { background: #1a9c3c; border-color: #1a9c3c; color: #fff; }
+  #vbar { display: none; flex: none; gap: 10px; padding: 8px 12px; align-items: center; background: #0f2233; color: #fff; font-size: 15px; }
+  #vbar .sp { flex: 1; }
+  #vbar button { font-size: 14px; padding: 6px 10px; border: 1px solid #567; border-radius: 8px; background: #1c3448; color: #fff; }
+  body.viewer #bar { display: none; }
+  body.viewer #vbar { display: flex; }
+  body.viewer .grip { display: none; }
+  #livePanel { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.45); }
+  #livePanel.open { display: flex; }
+  #livePanel .card { background: #fff; border-radius: 12px; padding: 16px; width: min(92vw, 440px); display: flex; flex-direction: column; gap: 10px; }
+  #livePanel input { width: 100%; padding: 10px; font-size: 14px; border: 1px solid #bbb; border-radius: 8px; }
+  #livePanel .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  #livePanel button { font-size: 15px; padding: 8px 12px; border: 1px solid #bbb; border-radius: 8px; background: #fff; }
+  #livePanel small { color: #555; }
   #laser { position: absolute; top: 0; left: 0; pointer-events: none; }
 </style>
 </head>
@@ -32,29 +57,67 @@
   <button id="btnMarker">🖍️ Marca-texto</button>
   <button id="btnLaser">🔴 Laser</button>
   <button id="btnEraser">🧽 Borracha</button>
+  <button id="btnSelect">⬚ Selecionar</button>
   <button id="btnKb">🔤 Texto</button>
+  <button id="btnLive">📡 Ao vivo</button>
   <span class="sp"></span>
+  <button id="btnPaste" disabled>📥 Colar</button>
+  <button id="btnUndo" disabled>↩️ Desfazer</button>
   <button id="btnClear">Limpar</button>
 </div>
+<div id="vbar"><span id="vstatus">Conectando…</span><span class="sp"></span><button id="btnFollow">📍 Seguindo o celular</button></div>
 <div id="scroller">
-  <div id="page">
-    <canvas id="ink"></canvas>
-    <canvas id="laser"></canvas>
+  <div id="stage">
+    <div id="page">
+      <canvas id="ink"></canvas>
+      <canvas id="laser"></canvas>
+      <div id="selRect"></div>
+      <div id="selBar"><button data-a="copy">📋 Copiar</button><button data-a="text">🔤 Copiar texto</button><button data-a="clear">🗑️ Limpar</button></div>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+<div id="livePanel">
+  <div class="card">
+    <strong>📡 Transmissão ao vivo</strong>
+    <div id="liveStatus"><small>…</small></div>
+    <input id="liveLink" readonly>
+    <small>Abra este link no outro computador para assistir (somente leitura). Quem tiver o link consegue ver a nota.</small>
+    <div class="row">
+      <button id="liveCopy">Copiar link</button>
+      <button id="liveShare">Compartilhar</button>
+      <button id="liveNew">Novo link</button>
+      <button id="liveStop">Parar</button>
+      <button id="liveClose">Fechar</button>
+    </div>
   </div>
 </div>
 <script>
-const KEY = 'bloco-notas-v1';
+const KEY = 'bloco-notas-v1', LIVE_KEY = 'bloco-notas-sala';
+// Chave pública (anon) do Supabase: feita para ficar no cliente. Só usamos Realtime Broadcast, sem acesso a tabelas.
+const SUPA_HOST = 'qqkvwspfsanzlogcvgwf.supabase.co';
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFxa3Z3c3Bmc2FuemxvZ2N2Z3dmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMTg2NzEsImV4cCI6MjEwNDc5NDY3MX0.zZ5XZWRTl1dga_wUi2VDe6HoCetxjKk1SgVY-XZ4L4M';
+const qs = new URLSearchParams(location.search);
+const VIEWER = qs.has('ver');   // ?ver=CODIGO abre a nota ao vivo, somente leitura
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
 const $ = id => document.getElementById(id);
-const scroller = $('scroller'), page = $('page'), canvas = $('ink');
+const scroller = $('scroller'), stage = $('stage'), page = $('page'), canvas = $('ink');
 const ctx = canvas.getContext('2d');
 const laserCv = $('laser'), lctx = laserCv.getContext('2d');
 
 let boxes = [];            // caixas de texto {x, y, w, text}
 const els = new Map();     // caixa -> <textarea>
 const grips = new Map();   // caixa -> alça de arrastar
+const boxById = new Map();
+let strokeById = new Map(); // só no modo visualização
+let viewScale = 1, remoteW = 0;
 const GRIP_H = 22;
-let strokes = [];          // {kind: 'pen'|'marker', w: largura base, pts: [[x, y, pressao], ...]}
+let strokes = [];          // {id, kind: 'pen'|'marker', w: largura base, pts: [[x, y, pressao], ...]}
 let lasers = [];           // pontos do laser [x, y, tempo]; não são salvos
+let selStrokes = new Set(), selBoxes = new Set(), selDrag = null, selRectPx = null; // seleção
+let appClip = null, pasteArmed = false; // área de transferência do app
+const undoStack = [];
 let drag = null;           // arrasto de caixa {b, dx, dy}
 let tool = 'pen';
 let current = null;        // traço em andamento
@@ -62,38 +125,58 @@ let saveTimer;
 
 // ---------- persistência ----------
 function save() {
+  if (VIEWER) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try { localStorage.setItem(KEY, JSON.stringify({ boxes: boxes.filter(b => b.text.trim()), strokes })); } catch (e) {}
   }, 300);
 }
 function load() {
+  if (VIEWER) return;
   try {
     const d = JSON.parse(localStorage.getItem(KEY) || 'null');
     if (d) {
       strokes = d.strokes || [];
-      boxes = (d.boxes || []).map(b => ({ ...b, y: Math.max(GRIP_H, b.y) }));
-      if (d.text) boxes.unshift({ x: 8, y: GRIP_H, w: Math.max(120, page.clientWidth - 16), text: d.text }); // nota da versão antiga
+      strokes.forEach(s => { s.id = s.id || uid(); });
+      boxes = (d.boxes || []).map(b => ({ ...b, id: b.id || uid(), y: Math.max(GRIP_H, b.y) }));
+      if (d.text) boxes.unshift({ id: uid(), x: 8, y: GRIP_H, w: Math.max(120, page.clientWidth - 16), text: d.text }); // nota da versão antiga
     }
   } catch (e) {}
 }
 
 // ---------- layout ----------
+const K = () => (window.devicePixelRatio || 1) * viewScale;
 function layout() {
   let bottom = 0;
   els.forEach((ta, b) => { bottom = Math.max(bottom, b.y + ta.offsetHeight); });
-  const h = Math.max(bottom, scroller.clientHeight) + 400; // sobra para desenhar abaixo do texto
-  const w = page.clientWidth, dpr = window.devicePixelRatio || 1;
+  const h = Math.max(bottom, VIEWER ? 0 : scroller.clientHeight) + 400; // sobra para desenhar abaixo do texto
+  const w = page.clientWidth;
+  const k = Math.min(K(), 16000 / h);
   page.style.height = h + 'px';
-  if (canvas.style.height === h + 'px' && canvas.style.width === w + 'px') return;
+  if (VIEWER) stage.style.height = h * viewScale + 'px';
+  const sig = w + 'x' + h + '@' + k;
+  if (canvas.dataset.sig === sig) return;
+  canvas.dataset.sig = sig;
   for (const [cv, c] of [[canvas, ctx], [laserCv, lctx]]) {
     cv.style.width = w + 'px';
     cv.style.height = h + 'px';
-    cv.width = Math.round(w * dpr);
-    cv.height = Math.round(h * dpr);
-    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cv.width = Math.round(w * k);
+    cv.height = Math.round(h * k);
+    c.setTransform(k, 0, 0, k, 0, 0);
   }
   redraw();
+}
+// visualização: mostra a página com a largura do celular, ampliada para caber na janela
+function fitViewer() {
+  if (!VIEWER || !remoteW) return;
+  viewScale = Math.min(2, Math.max(0.4, scroller.clientWidth / remoteW));
+  page.style.width = remoteW + 'px';
+  page.style.transformOrigin = '0 0';
+  page.style.transform = 'scale(' + viewScale + ')';
+  stage.style.width = remoteW * viewScale + 'px';
+  stage.style.margin = '0 auto';
+  canvas.dataset.sig = '';
+  layout();
 }
 
 // ---------- caixas de texto ----------
@@ -115,26 +198,46 @@ function gripAt(e) {
   }
   return null;
 }
+function removeBox(b) {
+  const ta = els.get(b), g = grips.get(b);
+  if (ta) ta.remove();
+  if (g) g.remove();
+  els.delete(b); grips.delete(b); boxById.delete(b.id); selBoxes.delete(b);
+  boxes = boxes.filter(x => x !== b);
+}
+function upsertBox(d) { // visualização: cria ou atualiza uma caixa vinda do celular
+  let b = boxById.get(d.id);
+  if (!b) { b = { ...d }; boxes.push(b); addBox(b, false); }
+  else { Object.assign(b, d); els.get(b).value = d.text; placeBox(b); fit(els.get(b)); }
+}
+const boxTimers = new Map();
+const pubStroke = s => ({ id: s.id, kind: s.kind || 'pen', w: s.w, pts: s.pts.map(p => [r1(p[0]), r1(p[1]), r2(p[2])]) });
+const pubBox = b => ({ id: b.id, x: r1(b.x), y: r1(b.y), w: r1(b.w), text: b.text });
+function sendBox(b) { // envia só o estado mais recente, no máximo a cada ~90 ms
+  if (!Live.joined || boxTimers.has(b)) return;
+  boxTimers.set(b, setTimeout(() => { boxTimers.delete(b); if (boxById.has(b.id)) emit('bx', pubBox(b)); }, 90));
+}
 function addBox(b, focus) {
   const ta = document.createElement('textarea');
-  ta.className = 'tb'; ta.rows = 1; ta.spellcheck = false; ta.value = b.text || '';
+  ta.className = 'tb'; ta.rows = 1; ta.spellcheck = false; ta.value = b.text || ''; ta.readOnly = VIEWER;
   const g = document.createElement('div');
   g.className = 'grip'; g.textContent = '⠿';
   page.insertBefore(g, canvas); page.insertBefore(ta, canvas);
-  els.set(b, ta); grips.set(b, g);
+  els.set(b, ta); grips.set(b, g); boxById.set(b.id, b);
   placeBox(b);
-  ta.addEventListener('input', () => { b.text = ta.value; fit(ta); layout(); save(); });
+  fit(ta);
+  if (VIEWER) return;
+  ta.addEventListener('input', () => { b.text = ta.value; fit(ta); layout(); save(); sendBox(b); });
   ta.addEventListener('blur', () => {
-    if (!ta.value.trim()) { ta.remove(); grips.get(b).remove(); els.delete(b); grips.delete(b); boxes = boxes.filter(x => x !== b); layout(); }
+    if (!ta.value.trim()) { removeBox(b); layout(); emit('bd', { id: b.id }); }
     save();
   });
-  fit(ta);
   if (focus) focusBox(ta);
 }
 function newBoxAt(x, y) {
   const pw = page.clientWidth;
   const bx = Math.max(8, Math.min(x, pw - 128));
-  const b = { x: bx, y: Math.max(GRIP_H, y - 16), w: Math.min(320, pw - bx - 8), text: '' };
+  const b = { id: uid(), x: bx, y: Math.max(GRIP_H, y - 16), w: Math.min(320, pw - bx - 8), text: '' };
   boxes.push(b);
   addBox(b, true);
   layout();
@@ -172,7 +275,19 @@ function drawStroke(s) {
 }
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  strokes.forEach(drawStroke);
+  for (const st of strokes) {
+    if (selStrokes.has(st)) { // halo azul sob o traço selecionado
+      ctx.save();
+      ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(26, 115, 232, .35)';
+      ctx.lineWidth = (st.kind === 'marker' ? st.w : 6) + 8;
+      ctx.beginPath(); ctx.moveTo(st.pts[0][0], st.pts[0][1]);
+      for (let i = 1; i < st.pts.length; i++) ctx.lineTo(st.pts[i][0], st.pts[i][1]);
+      if (st.pts.length === 1) ctx.lineTo(st.pts[0][0] + 0.1, st.pts[0][1]);
+      ctx.stroke(); ctx.restore();
+    }
+    drawStroke(st);
+  }
 }
 
 // ---------- laser (some sozinho) ----------
@@ -199,49 +314,180 @@ function laserPoint(x, y, brk) {
   if (!laserRaf) laserRaf = requestAnimationFrame(laserFrame);
 }
 
+// ---------- envio ao vivo (celular) ----------
+const emit = (ev, payload) => { if (!VIEWER) Live.send(ev, payload); };
+const pend = { sp: null, lz: [] };
+let pendTimer = 0;
+function flushPend() {
+  clearTimeout(pendTimer); pendTimer = 0;
+  if (pend.sp && pend.sp.pts.length) { emit('sp', { id: pend.sp.id, pts: pend.sp.pts }); pend.sp.pts = []; }
+  if (pend.lz.length) { emit('lz', { pts: pend.lz }); pend.lz = []; }
+}
+const schedFlush = () => { if (!pendTimer) pendTimer = setTimeout(flushPend, 40); };
+const scrollInfo = () => ({ y: Math.round(scroller.scrollTop), vh: scroller.clientHeight });
+let stateTimer = 0;
+function sendState() { // estado completo: quando alguém entra ou a conexão volta
+  clearTimeout(stateTimer);
+  stateTimer = setTimeout(() => {
+    if (!Live.joined) return;
+    const chunks = []; let cur = [], size = 0;
+    for (const s of strokes) {
+      const o = pubStroke(s);
+      const n = JSON.stringify(o).length;
+      if (size + n > 60000 && cur.length) { chunks.push(cur); cur = []; size = 0; }
+      cur.push(o); size += n;
+    }
+    chunks.push(cur);
+    chunks.forEach((c, i) => setTimeout(() => emit('state', i === 0
+      ? { part: 0, w: page.clientWidth, boxes: boxes.filter(b => b.text.trim()).map(pubBox), strokes: c, sc: scrollInfo() }
+      : { part: i, strokes: c }), i * 40));
+  }, 200);
+}
+
+// ---------- seleção, copiar, colar, desfazer ----------
+let toastTimer = 0;
+function toast(msg, ms = 2200) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+function pushUndo(fn) { undoStack.push(fn); if (undoStack.length > 20) undoStack.shift(); $('btnUndo').disabled = false; }
+const normRect = d => ({ x: Math.min(d.x0, d.x), y: Math.min(d.y0, d.y), w: Math.abs(d.x - d.x0), h: Math.abs(d.y - d.y0) });
+function placeSelRect(r) {
+  const e = $('selRect');
+  e.style.display = 'block'; e.style.left = r.x + 'px'; e.style.top = r.y + 'px'; e.style.width = r.w + 'px'; e.style.height = r.h + 'px';
+}
+function updateSelUI() {
+  els.forEach((ta, b) => ta.classList.toggle('sel', selBoxes.has(b)));
+  redraw();
+  const has = selStrokes.size || selBoxes.size;
+  $('selBar').style.display = has ? 'flex' : 'none';
+  if (!selDrag) $('selRect').style.display = has ? 'block' : 'none';
+  if (has && selRectPx) {
+    placeSelRect(selRectPx);
+    const bar = $('selBar');
+    bar.style.left = Math.max(4, Math.min(selRectPx.x, page.clientWidth - bar.offsetWidth - 4)) + 'px';
+    bar.style.top = Math.max(4, selRectPx.y - bar.offsetHeight - 8) + 'px';
+  }
+}
+function clearSelection() { selStrokes.clear(); selBoxes.clear(); selRectPx = null; selDrag = null; updateSelUI(); }
+function finishSelect() {
+  const r = normRect(selDrag); selDrag = null;
+  if (r.w < 6 && r.h < 6) { clearSelection(); return; } // toque simples: só limpa a seleção
+  const inR = (x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  selStrokes = new Set(strokes.filter(s => s.pts.some(p => inR(p[0], p[1]))));
+  selBoxes = new Set(boxes.filter(b => {
+    const ta = els.get(b);
+    return ta && b.x < r.x + r.w && b.x + ta.offsetWidth > r.x && b.y < r.y + r.h && b.y + ta.offsetHeight > r.y;
+  }));
+  selRectPx = r;
+  if (!selStrokes.size && !selBoxes.size) { $('selRect').style.display = 'none'; toast('Nada selecionado'); }
+  updateSelUI();
+}
+function addItems(ss, bs) { // adiciona traços e caixas (colar, desfazer)
+  strokes.push(...ss); ss.forEach(st => emit('sb', pubStroke(st)));
+  bs.forEach(b => { boxes.push(b); addBox(b, false); if (b.text.trim()) sendBox(b); });
+  layout(); redraw(); save();
+}
+function removeItems(ss, bs) {
+  const set = new Set(ss);
+  strokes = strokes.filter(st => !set.has(st));
+  bs.forEach(b => { removeBox(b); emit('bd', { id: b.id }); });
+  if (ss.length) emit('er', { ids: ss.map(st => st.id) });
+  layout(); redraw(); save();
+}
+function selAction(a) {
+  const ss = [...selStrokes], bs = [...selBoxes];
+  if (a === 'copy') {
+    let minX = Infinity, minY = Infinity;
+    ss.forEach(st => st.pts.forEach(p => { minX = Math.min(minX, p[0]); minY = Math.min(minY, p[1]); }));
+    bs.forEach(b => { minX = Math.min(minX, b.x); minY = Math.min(minY, b.y); });
+    appClip = { minX, minY,
+      strokes: ss.map(st => ({ kind: st.kind || 'pen', w: st.w, pts: st.pts.map(p => [...p]) })),
+      boxes: bs.map(b => ({ x: b.x, y: b.y, w: b.w, text: b.text })) };
+    $('btnPaste').disabled = false;
+    toast('Copiado. Toque em 📥 Colar e depois no local.');
+    clearSelection();
+  } else if (a === 'text') {
+    const t = bs.sort((p, q) => p.y - q.y || p.x - q.x).map(b => b.text.trim()).filter(Boolean).join('\n\n');
+    if (!t) { toast('Nenhuma caixa de texto na seleção'); return; }
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Texto copiado'), () => toast('Não foi possível copiar o texto'));
+  } else if (a === 'clear') {
+    clearSelection();
+    removeItems(ss, bs);
+    pushUndo(() => addItems(ss, bs));
+    toast('Apagado. Toque em ↩️ Desfazer para recuperar.');
+  }
+}
+function doPaste(x, y) {
+  if (!appClip) return;
+  const pw = page.clientWidth, dx = x - appClip.minX, dy = y - appClip.minY;
+  const ns = appClip.strokes.map(st => ({ id: uid(), kind: st.kind, w: st.w, pts: st.pts.map(p => [p[0] + dx, p[1] + dy, p[2]]) }));
+  const nb = appClip.boxes.map(b => ({ id: uid(), x: Math.max(0, Math.min(b.x + dx, pw - 60)), y: Math.max(GRIP_H, b.y + dy), w: b.w, text: b.text }));
+  addItems(ns, nb);
+  pushUndo(() => removeItems(ns, nb));
+}
+
 // ---------- caneta / borracha ----------
 const pos = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
 function eraseAt(x, y) {
-  const R = 14, before = strokes.length;
-  strokes = strokes.filter(s => !s.pts.some(p => Math.hypot(p[0]-x, p[1]-y) < R));
-  if (strokes.length !== before) { redraw(); save(); }
+  const R = 14;
+  const gone = strokes.filter(s => s.pts.some(p => Math.hypot(p[0]-x, p[1]-y) < R));
+  if (!gone.length) return;
+  strokes = strokes.filter(s => !gone.includes(s));
+  gone.forEach(s => selStrokes.delete(s));
+  redraw(); save();
+  emit('er', { ids: gone.map(s => s.id) });
 }
 const isEraser = e => tool === 'eraser' || (e.buttons & 32) || (e.button === 5); // botão de borracha / lateral
 
 let touch = null; // gesto de dedo: rolar a página ou tocar para digitar
 canvas.addEventListener('pointerdown', e => {
+  if (VIEWER) return;
   e.preventDefault(); // evita o mousedown de compatibilidade, que tira o foco da caixa recém-criada
   canvas.setPointerCapture(e.pointerId);
   const [x, y] = pos(e);
+  if (pasteArmed) { pasteArmed = false; doPaste(x, y); return; }
   const gb = gripAt(e); // alça de uma caixa: arrasta com dedo, caneta ou mouse
   if (gb) { drag = { b: gb, dx: x - gb.x, dy: y - gb.y }; return; }
+  if (tool === 'select' && !isEraser(e)) { clearSelection(); selDrag = { x0: x, y0: y, x, y }; return; }
   if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
     if (isEraser(e)) { current = { erase: true }; eraseAt(x, y); return; }
-    if (tool === 'laser') { current = { laser: true }; laserPoint(x, y, true); return; }
+    if (tool === 'laser') { current = { laser: true }; laserPoint(x, y, true); pend.lz.push([r1(x), r1(y), 1]); schedFlush(); return; }
     current = tool === 'marker'
-      ? { kind: 'marker', w: 18, pts: [[x, y, 0.5]] }
-      : { kind: 'pen', w: 2.2, pts: [[x, y, e.pressure || 0.5]] };
+      ? { id: uid(), kind: 'marker', w: 18, pts: [[x, y, 0.5]] }
+      : { id: uid(), kind: 'pen', w: 2.2, pts: [[x, y, e.pressure || 0.5]] };
     strokes.push(current);
+    emit('sb', { id: current.id, kind: current.kind, w: current.w, pts: [[r1(x), r1(y), r2(current.pts[0][2])]] });
+    pend.sp = { id: current.id, pts: [] };
     redraw();
   } else {
     touch = { y: e.clientY, x: e.clientX, moved: false };
   }
 });
 canvas.addEventListener('pointermove', e => {
+  if (VIEWER) return;
   if (drag) {
     const [x, y] = pos(e);
     drag.b.x = Math.max(0, Math.min(x - drag.dx, page.clientWidth - 60));
     drag.b.y = Math.max(GRIP_H, y - drag.dy);
-    placeBox(drag.b); layout();
+    placeBox(drag.b); layout(); sendBox(drag.b);
+  } else if (selDrag) {
+    [selDrag.x, selDrag.y] = pos(e);
+    placeSelRect(normRect(selDrag));
   } else if (current && (e.pointerType === 'pen' || e.pointerType === 'mouse')) {
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     for (const ev of (evs.length ? evs : [e])) {
       const [x, y] = pos(ev);
       if (current.erase) eraseAt(x, y);
-      else if (current.laser) laserPoint(x, y, false);
-      else current.pts.push([x, y, current.kind === 'marker' ? 0.5 : (ev.pressure || 0.5)]);
+      else if (current.laser) { laserPoint(x, y, false); pend.lz.push([r1(x), r1(y), 0]); }
+      else {
+        const pr = current.kind === 'marker' ? 0.5 : (ev.pressure || 0.5);
+        current.pts.push([x, y, pr]);
+        pend.sp.pts.push([r1(x), r1(y), r2(pr)]);
+      }
     }
     if (current.pts) redraw();
+    schedFlush();
   } else if (touch) {
     const dy = e.clientY - touch.y;
     if (Math.abs(dy) > 10 || Math.abs(e.clientX - touch.x) > 10) touch.moved = true;
@@ -249,6 +495,9 @@ canvas.addEventListener('pointermove', e => {
   }
 });
 function end(e) {
+  if (VIEWER) return;
+  if (selDrag) { finishSelect(); return; }
+  flushPend(); pend.sp = null;
   if (drag) { drag = null; save(); }
   if (current) { if (current.pts) save(); current = null; }
   if (touch) {
@@ -260,16 +509,167 @@ canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 
 // ---------- UI ----------
-const TOOLS = { pen: 'btnPen', marker: 'btnMarker', laser: 'btnLaser', eraser: 'btnEraser' };
+const TOOLS = { pen: 'btnPen', marker: 'btnMarker', laser: 'btnLaser', eraser: 'btnEraser', select: 'btnSelect' };
 function setTool(t) {
-  tool = t;
+  tool = t; pasteArmed = false;
+  if (t !== 'select') clearSelection();
   for (const k in TOOLS) $(TOOLS[k]).classList.toggle('on', k === t);
 }
 for (const k in TOOLS) $(TOOLS[k]).onclick = () => setTool(k);
+$('selBar').addEventListener('click', e => { const a = e.target.dataset && e.target.dataset.a; if (a) selAction(a); });
+$('btnPaste').onclick = () => { if (appClip) { pasteArmed = true; toast('Toque onde quer colar'); } };
+$('btnUndo').onclick = () => { const f = undoStack.pop(); if (f) f(); $('btnUndo').disabled = !undoStack.length; };
 $('btnKb').onclick = () => newBoxAt(16, scroller.scrollTop + 32);
-$('btnClear').onclick = () => { if (confirm('Apagar todos os desenhos? (o texto fica)')) { strokes = []; redraw(); save(); } };
-window.addEventListener('resize', layout);
-if ('visualViewport' in window) visualViewport.addEventListener('resize', () => {
+$('btnClear').onclick = () => { if (confirm('Apagar todos os desenhos? (o texto fica)')) {
+  const old = strokes; strokes = []; clearSelection(); save(); emit('clr', {});
+  pushUndo(() => { strokes = old.concat(strokes); redraw(); save(); old.forEach(st => emit('sb', pubStroke(st))); });
+} };
+
+// ---------- Supabase Realtime (Broadcast) ----------
+// Protocolo Phoenix (JSON v1), o mesmo que o supabase-js usa; sem dependências.
+const Live = {
+  ws: null, topic: '', joined: false, want: false, ref: 0, hb: 0, retry: 0, lastError: '',
+  handlers: {}, onStatus() {}, onJoin() {},
+  on(ev, fn) { this.handlers[ev] = fn; },
+  start(room) { this.stop(); this.topic = 'realtime:bn-' + room; this.want = true; this.retry = 0; this._open(); },
+  stop() {
+    this.want = false; this.joined = false; clearInterval(this.hb);
+    const ws = this.ws; this.ws = null;
+    if (ws) { try { ws.close(); } catch (e) {} }
+    this.onStatus('off');
+  },
+  _push(topic, event, payload) {
+    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ topic, event, payload, ref: String(++this.ref) }));
+  },
+  send(ev, payload) { if (this.joined) this._push(this.topic, 'broadcast', { type: 'broadcast', event: ev, payload }); },
+  _open() {
+    if (!this.want) return;
+    this.onStatus('connecting');
+    const ws = this.ws = new WebSocket('wss://' + SUPA_HOST + '/realtime/v1/websocket?apikey=' + SUPA_KEY + '&vsn=1.0.0');
+    ws.onopen = () => {
+      this._push(this.topic, 'phx_join', { config: { broadcast: { ack: false, self: false }, presence: { key: '' }, private: false }, access_token: SUPA_KEY });
+      clearInterval(this.hb);
+      this.hb = setInterval(() => this._push('phoenix', 'heartbeat', {}), 25000);
+    };
+    ws.onmessage = ev => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.topic !== this.topic) return;
+      if (m.event === 'phx_reply') {
+        if (m.payload && m.payload.status === 'ok') { this.joined = true; this.retry = 0; this.lastError = ''; this.onStatus('live'); this.onJoin(); }
+        else { this.lastError = JSON.stringify((m.payload && m.payload.response) || m.payload || ''); this.onStatus('error'); }
+      } else if (m.event === 'broadcast' && m.payload) {
+        const h = this.handlers[m.payload.event];
+        if (h) h(m.payload.payload || {});
+      }
+    };
+    ws.onclose = () => {
+      if (this.ws !== ws) return; // fechado de propósito
+      clearInterval(this.hb); this.joined = false;
+      if (!this.want) return;
+      this.onStatus('connecting');
+      setTimeout(() => this._open(), Math.min(5000, 1000 * ++this.retry));
+    };
+  }
+};
+
+// ---------- celular: painel "Ao vivo" ----------
+function liveSaved() { try { return JSON.parse(localStorage.getItem(LIVE_KEY) || '{}'); } catch (e) { return {}; } }
+function liveWrite(o) { try { localStorage.setItem(LIVE_KEY, JSON.stringify(o)); } catch (e) {} }
+function newCode() {
+  const al = 'abcdefghjkmnpqrstuvwxyz23456789';
+  return Array.from(crypto.getRandomValues(new Uint8Array(10)), b => al[b % al.length]).join('');
+}
+const liveLink = () => location.origin + location.pathname + '?ver=' + liveSaved().code;
+function refreshLiveUI(status) {
+  const btn = $('btnLive');
+  btn.classList.toggle('live', status === 'live');
+  btn.classList.toggle('wait', status === 'connecting' || status === 'error');
+  const msg = { live: '🟢 Transmitindo ao vivo', connecting: '🟠 Conectando…', error: '🔴 Erro ao conectar ' + Live.lastError, off: '⚪ Transmissão desligada' }[status] || '';
+  $('liveStatus').innerHTML = '<small>' + msg + '</small>';
+  $('liveLink').value = Live.want ? liveLink() : '';
+}
+function startLive(fresh) {
+  const st = liveSaved();
+  if (!st.code || fresh) st.code = newCode();
+  st.on = true; liveWrite(st);
+  Live.start(st.code);
+  refreshLiveUI('connecting');
+}
+if (!VIEWER) {
+  Live.onStatus = refreshLiveUI;
+  Live.onJoin = sendState;
+  Live.on('hello', sendState);
+  $('btnLive').onclick = () => { if (!Live.want) startLive(); $('livePanel').classList.add('open'); refreshLiveUI(Live.joined ? 'live' : Live.want ? 'connecting' : 'off'); };
+  $('liveClose').onclick = () => $('livePanel').classList.remove('open');
+  $('liveStop').onclick = () => { const st = liveSaved(); st.on = false; liveWrite(st); Live.stop(); $('livePanel').classList.remove('open'); };
+  $('liveNew').onclick = () => startLive(true);
+  $('liveCopy').onclick = async () => {
+    try { await navigator.clipboard.writeText(liveLink()); $('liveCopy').textContent = 'Copiado ✓'; }
+    catch (e) { $('liveLink').select(); }
+    setTimeout(() => { $('liveCopy').textContent = 'Copiar link'; }, 1500);
+  };
+  $('liveShare').onclick = () => { if (navigator.share) navigator.share({ title: 'Bloco de Notas ao vivo', url: liveLink() }).catch(() => {}); else $('liveCopy').click(); };
+  let scTimer = 0;
+  scroller.addEventListener('scroll', () => {
+    if (scTimer) return;
+    scTimer = setTimeout(() => { scTimer = 0; emit('sc', scrollInfo()); }, 120);
+  }, { passive: true });
+  if (liveSaved().on) startLive();
+}
+
+// ---------- computador: visualização ao vivo ----------
+if (VIEWER) {
+  document.body.classList.add('viewer');
+  document.title = 'Ao vivo · Bloco de Notas';
+  canvas.style.pointerEvents = 'none';
+  let gotState = false, following = true;
+  const vstatus = t => { $('vstatus').textContent = t; };
+  const updateFollow = () => { $('btnFollow').textContent = following ? '📍 Seguindo o celular' : '📍 Seguir o celular'; };
+  const stopFollow = () => { if (following) { following = false; updateFollow(); } };
+  ['wheel', 'touchstart', 'pointerdown'].forEach(t => scroller.addEventListener(t, stopFollow, { passive: true }));
+  $('btnFollow').onclick = () => { following = true; updateFollow(); if (lastSc) followScroll(lastSc); };
+  let lastSc = null;
+  function followScroll(sc) {
+    lastSc = sc;
+    if (following) scroller.scrollTop = (sc.y + sc.vh / 2) * viewScale - scroller.clientHeight / 2;
+  }
+  let redrawQ = 0;
+  const scheduleRedraw = () => { if (!redrawQ) redrawQ = requestAnimationFrame(() => { redrawQ = 0; redraw(); }); };
+  const addRemoteStroke = st => { if (strokeById.has(st.id)) return; strokes.push(st); strokeById.set(st.id, st); };
+
+  Live.onStatus = st => {
+    if (st === 'live') vstatus(gotState ? '🟢 Ao vivo' : '🟠 Aguardando o celular…');
+    else if (st === 'connecting') vstatus('🟠 Conectando…');
+    else if (st === 'error') vstatus('🔴 Erro ao conectar ' + Live.lastError);
+  };
+  Live.onJoin = () => Live.send('hello', {});
+  setInterval(() => { if (!gotState) Live.send('hello', {}); }, 3000);
+
+  Live.on('state', d => {
+    if (d.part === 0) {
+      boxes.slice().forEach(removeBox);
+      strokes = []; strokeById = new Map();
+      remoteW = d.w; fitViewer();
+      (d.boxes || []).forEach(upsertBox);
+      if (d.sc) followScroll(d.sc);
+    }
+    (d.strokes || []).forEach(addRemoteStroke);
+    layout(); scheduleRedraw();
+    if (!gotState) { gotState = true; vstatus('🟢 Ao vivo'); }
+  });
+  Live.on('sb', d => { addRemoteStroke(d); scheduleRedraw(); });
+  Live.on('sp', d => { const st = strokeById.get(d.id); if (st) { st.pts.push(...d.pts); scheduleRedraw(); } });
+  Live.on('er', d => { strokes = strokes.filter(st => !d.ids.includes(st.id)); d.ids.forEach(id => strokeById.delete(id)); scheduleRedraw(); });
+  Live.on('clr', () => { strokes = []; strokeById = new Map(); scheduleRedraw(); });
+  Live.on('bx', d => { upsertBox(d); layout(); });
+  Live.on('bd', d => { const b = boxById.get(d.id); if (b) { removeBox(b); layout(); } });
+  Live.on('lz', d => (d.pts || []).forEach(p => laserPoint(p[0], p[1], !!p[2])));
+  Live.on('sc', followScroll);
+  Live.start(qs.get('ver'));
+}
+
+window.addEventListener('resize', () => { layout(); fitViewer(); });
+if ('visualViewport' in window && !VIEWER) visualViewport.addEventListener('resize', () => {
   document.body.style.height = visualViewport.height + 'px'; // área útil acima do teclado
 });
 
