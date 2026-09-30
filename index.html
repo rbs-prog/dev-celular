@@ -25,6 +25,7 @@
 <div id="bar">
   <button id="btnPen" class="on">✏️ Caneta</button>
   <button id="btnEraser">🧽 Borracha</button>
+  <button id="btnKb">⌨️</button>
   <span class="sp"></span>
   <button id="btnClear">Limpar desenho</button>
 </div>
@@ -123,14 +124,14 @@ canvas.addEventListener('pointermove', e => {
     if (!current.erase) redraw();
   } else if (touch) {
     const dy = e.clientY - touch.y;
-    if (Math.abs(dy) > 4 || Math.abs(e.clientX - touch.x) > 4) touch.moved = true;
+    if (Math.abs(dy) > 10 || Math.abs(e.clientX - touch.x) > 10) touch.moved = true;
     scroller.scrollTop -= dy; touch.y = e.clientY;
   }
 });
 function end(e) {
   if (current) { if (!current.erase) save(); current = null; }
   if (touch) {
-    if (!touch.moved) text.focus(); // toque de dedo = digitar
+    if (!touch.moved) openKeyboard(); // toque de dedo = digitar
     touch = null;
   }
 }
@@ -138,6 +139,11 @@ canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 
 // ---------- UI ----------
+function openKeyboard() {
+  // blur antes: se o campo já está focado (teclado escondido), focus() sozinho não reabre o teclado
+  text.blur();
+  text.focus();
+}
 function setTool(t) {
   tool = t;
   $('btnPen').classList.toggle('on', t === 'pen');
@@ -145,6 +151,7 @@ function setTool(t) {
 }
 $('btnPen').onclick = () => setTool('pen');
 $('btnEraser').onclick = () => setTool('eraser');
+$('btnKb').onclick = openKeyboard;
 $('btnClear').onclick = () => { if (confirm('Apagar todo o desenho?')) { strokes = []; redraw(); save(); } };
 text.addEventListener('input', () => { layout(); save(); });
 window.addEventListener('resize', layout);
