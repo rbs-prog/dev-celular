@@ -24,6 +24,15 @@
           background: #e6ecf2; border-radius: 6px 6px 0 0; pointer-events: none; user-select: none; }
   #stage { position: relative; width: 100%; }
   #ink { position: absolute; top: 0; left: 0; touch-action: none; }
+  #bar button:disabled { opacity: .4; }
+  .tb.sel { outline: 2px solid #1a73e8; background: rgba(26, 115, 232, .08); }
+  #selRect { position: absolute; display: none; pointer-events: none; border: 2px dashed #1a73e8; background: rgba(26, 115, 232, .10); }
+  #selBar { position: absolute; display: none; gap: 6px; padding: 6px; background: #fff; border: 1px solid #bbb; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+  #selBar button { font-size: 14px; padding: 8px 10px; border: 1px solid #bbb; border-radius: 8px; background: #fff; white-space: nowrap; }
+  body.viewer #selBar, body.viewer #selRect { display: none !important; }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20; background: #222; color: #fff; padding: 10px 16px;
+           border-radius: 20px; font-size: 15px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; text-align: center; }
+  #toast.show { opacity: .95; }
   #btnLive.wait { background: #f0a500; border-color: #f0a500; color: #000; }
   #btnLive.live { background: #1a9c3c; border-color: #1a9c3c; color: #fff; }
   #vbar { display: none; flex: none; gap: 10px; padding: 8px 12px; align-items: center; background: #0f2233; color: #fff; font-size: 15px; }
@@ -48,9 +57,12 @@
   <button id="btnMarker">🖍️ Marca-texto</button>
   <button id="btnLaser">🔴 Laser</button>
   <button id="btnEraser">🧽 Borracha</button>
+  <button id="btnSelect">⬚ Selecionar</button>
   <button id="btnKb">🔤 Texto</button>
   <button id="btnLive">📡 Ao vivo</button>
   <span class="sp"></span>
+  <button id="btnPaste" disabled>📥 Colar</button>
+  <button id="btnUndo" disabled>↩️ Desfazer</button>
   <button id="btnClear">Limpar</button>
 </div>
 <div id="vbar"><span id="vstatus">Conectando…</span><span class="sp"></span><button id="btnFollow">📍 Seguindo o celular</button></div>
@@ -59,9 +71,12 @@
     <div id="page">
       <canvas id="ink"></canvas>
       <canvas id="laser"></canvas>
+      <div id="selRect"></div>
+      <div id="selBar"><button data-a="copy">📋 Copiar</button><button data-a="text">🔤 Copiar texto</button><button data-a="clear">🗑️ Limpar</button></div>
     </div>
   </div>
 </div>
+<div id="toast"></div>
 <div id="livePanel">
   <div class="card">
     <strong>📡 Transmissão ao vivo</strong>
@@ -100,6 +115,9 @@ let viewScale = 1, remoteW = 0;
 const GRIP_H = 22;
 let strokes = [];          // {id, kind: 'pen'|'marker', w: largura base, pts: [[x, y, pressao], ...]}
 let lasers = [];           // pontos do laser [x, y, tempo]; não são salvos
+let selStrokes = new Set(), selBoxes = new Set(), selDrag = null, selRectPx = null; // seleção
+let appClip = null, pasteArmed = false; // área de transferência do app
+const undoStack = [];
 let drag = null;           // arrasto de caixa {b, dx, dy}
 let tool = 'pen';
 let current = null;        // traço em andamento
@@ -184,7 +202,7 @@ function removeBox(b) {
   const ta = els.get(b), g = grips.get(b);
   if (ta) ta.remove();
   if (g) g.remove();
-  els.delete(b); grips.delete(b); boxById.delete(b.id);
+  els.delete(b); grips.delete(b); boxById.delete(b.id); selBoxes.delete(b);
   boxes = boxes.filter(x => x !== b);
 }
 function upsertBox(d) { // visualização: cria ou atualiza uma caixa vinda do celular
@@ -193,6 +211,7 @@ function upsertBox(d) { // visualização: cria ou atualiza uma caixa vinda do c
   else { Object.assign(b, d); els.get(b).value = d.text; placeBox(b); fit(els.get(b)); }
 }
 const boxTimers = new Map();
+const pubStroke = s => ({ id: s.id, kind: s.kind || 'pen', w: s.w, pts: s.pts.map(p => [r1(p[0]), r1(p[1]), r2(p[2])]) });
 const pubBox = b => ({ id: b.id, x: r1(b.x), y: r1(b.y), w: r1(b.w), text: b.text });
 function sendBox(b) { // envia só o estado mais recente, no máximo a cada ~90 ms
   if (!Live.joined || boxTimers.has(b)) return;
@@ -256,7 +275,19 @@ function drawStroke(s) {
 }
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  strokes.forEach(drawStroke);
+  for (const st of strokes) {
+    if (selStrokes.has(st)) { // halo azul sob o traço selecionado
+      ctx.save();
+      ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(26, 115, 232, .35)';
+      ctx.lineWidth = (st.kind === 'marker' ? st.w : 6) + 8;
+      ctx.beginPath(); ctx.moveTo(st.pts[0][0], st.pts[0][1]);
+      for (let i = 1; i < st.pts.length; i++) ctx.lineTo(st.pts[i][0], st.pts[i][1]);
+      if (st.pts.length === 1) ctx.lineTo(st.pts[0][0] + 0.1, st.pts[0][1]);
+      ctx.stroke(); ctx.restore();
+    }
+    drawStroke(st);
+  }
 }
 
 // ---------- laser (some sozinho) ----------
@@ -301,7 +332,7 @@ function sendState() { // estado completo: quando alguém entra ou a conexão vo
     if (!Live.joined) return;
     const chunks = []; let cur = [], size = 0;
     for (const s of strokes) {
-      const o = { id: s.id, kind: s.kind || 'pen', w: s.w, pts: s.pts.map(p => [r1(p[0]), r1(p[1]), r2(p[2])]) };
+      const o = pubStroke(s);
       const n = JSON.stringify(o).length;
       if (size + n > 60000 && cur.length) { chunks.push(cur); cur = []; size = 0; }
       cur.push(o); size += n;
@@ -313,6 +344,89 @@ function sendState() { // estado completo: quando alguém entra ou a conexão vo
   }, 200);
 }
 
+// ---------- seleção, copiar, colar, desfazer ----------
+let toastTimer = 0;
+function toast(msg, ms = 2200) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+function pushUndo(fn) { undoStack.push(fn); if (undoStack.length > 20) undoStack.shift(); $('btnUndo').disabled = false; }
+const normRect = d => ({ x: Math.min(d.x0, d.x), y: Math.min(d.y0, d.y), w: Math.abs(d.x - d.x0), h: Math.abs(d.y - d.y0) });
+function placeSelRect(r) {
+  const e = $('selRect');
+  e.style.display = 'block'; e.style.left = r.x + 'px'; e.style.top = r.y + 'px'; e.style.width = r.w + 'px'; e.style.height = r.h + 'px';
+}
+function updateSelUI() {
+  els.forEach((ta, b) => ta.classList.toggle('sel', selBoxes.has(b)));
+  redraw();
+  const has = selStrokes.size || selBoxes.size;
+  $('selBar').style.display = has ? 'flex' : 'none';
+  if (!selDrag) $('selRect').style.display = has ? 'block' : 'none';
+  if (has && selRectPx) {
+    placeSelRect(selRectPx);
+    const bar = $('selBar');
+    bar.style.left = Math.max(4, Math.min(selRectPx.x, page.clientWidth - bar.offsetWidth - 4)) + 'px';
+    bar.style.top = Math.max(4, selRectPx.y - bar.offsetHeight - 8) + 'px';
+  }
+}
+function clearSelection() { selStrokes.clear(); selBoxes.clear(); selRectPx = null; selDrag = null; updateSelUI(); }
+function finishSelect() {
+  const r = normRect(selDrag); selDrag = null;
+  if (r.w < 6 && r.h < 6) { clearSelection(); return; } // toque simples: só limpa a seleção
+  const inR = (x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  selStrokes = new Set(strokes.filter(s => s.pts.some(p => inR(p[0], p[1]))));
+  selBoxes = new Set(boxes.filter(b => {
+    const ta = els.get(b);
+    return ta && b.x < r.x + r.w && b.x + ta.offsetWidth > r.x && b.y < r.y + r.h && b.y + ta.offsetHeight > r.y;
+  }));
+  selRectPx = r;
+  if (!selStrokes.size && !selBoxes.size) { $('selRect').style.display = 'none'; toast('Nada selecionado'); }
+  updateSelUI();
+}
+function addItems(ss, bs) { // adiciona traços e caixas (colar, desfazer)
+  strokes.push(...ss); ss.forEach(st => emit('sb', pubStroke(st)));
+  bs.forEach(b => { boxes.push(b); addBox(b, false); if (b.text.trim()) sendBox(b); });
+  layout(); redraw(); save();
+}
+function removeItems(ss, bs) {
+  const set = new Set(ss);
+  strokes = strokes.filter(st => !set.has(st));
+  bs.forEach(b => { removeBox(b); emit('bd', { id: b.id }); });
+  if (ss.length) emit('er', { ids: ss.map(st => st.id) });
+  layout(); redraw(); save();
+}
+function selAction(a) {
+  const ss = [...selStrokes], bs = [...selBoxes];
+  if (a === 'copy') {
+    let minX = Infinity, minY = Infinity;
+    ss.forEach(st => st.pts.forEach(p => { minX = Math.min(minX, p[0]); minY = Math.min(minY, p[1]); }));
+    bs.forEach(b => { minX = Math.min(minX, b.x); minY = Math.min(minY, b.y); });
+    appClip = { minX, minY,
+      strokes: ss.map(st => ({ kind: st.kind || 'pen', w: st.w, pts: st.pts.map(p => [...p]) })),
+      boxes: bs.map(b => ({ x: b.x, y: b.y, w: b.w, text: b.text })) };
+    $('btnPaste').disabled = false;
+    toast('Copiado. Toque em 📥 Colar e depois no local.');
+    clearSelection();
+  } else if (a === 'text') {
+    const t = bs.sort((p, q) => p.y - q.y || p.x - q.x).map(b => b.text.trim()).filter(Boolean).join('\n\n');
+    if (!t) { toast('Nenhuma caixa de texto na seleção'); return; }
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Texto copiado'), () => toast('Não foi possível copiar o texto'));
+  } else if (a === 'clear') {
+    clearSelection();
+    removeItems(ss, bs);
+    pushUndo(() => addItems(ss, bs));
+    toast('Apagado. Toque em ↩️ Desfazer para recuperar.');
+  }
+}
+function doPaste(x, y) {
+  if (!appClip) return;
+  const pw = page.clientWidth, dx = x - appClip.minX, dy = y - appClip.minY;
+  const ns = appClip.strokes.map(st => ({ id: uid(), kind: st.kind, w: st.w, pts: st.pts.map(p => [p[0] + dx, p[1] + dy, p[2]]) }));
+  const nb = appClip.boxes.map(b => ({ id: uid(), x: Math.max(0, Math.min(b.x + dx, pw - 60)), y: Math.max(GRIP_H, b.y + dy), w: b.w, text: b.text }));
+  addItems(ns, nb);
+  pushUndo(() => removeItems(ns, nb));
+}
+
 // ---------- caneta / borracha ----------
 const pos = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
 function eraseAt(x, y) {
@@ -320,6 +434,7 @@ function eraseAt(x, y) {
   const gone = strokes.filter(s => s.pts.some(p => Math.hypot(p[0]-x, p[1]-y) < R));
   if (!gone.length) return;
   strokes = strokes.filter(s => !gone.includes(s));
+  gone.forEach(s => selStrokes.delete(s));
   redraw(); save();
   emit('er', { ids: gone.map(s => s.id) });
 }
@@ -331,8 +446,10 @@ canvas.addEventListener('pointerdown', e => {
   e.preventDefault(); // evita o mousedown de compatibilidade, que tira o foco da caixa recém-criada
   canvas.setPointerCapture(e.pointerId);
   const [x, y] = pos(e);
+  if (pasteArmed) { pasteArmed = false; doPaste(x, y); return; }
   const gb = gripAt(e); // alça de uma caixa: arrasta com dedo, caneta ou mouse
   if (gb) { drag = { b: gb, dx: x - gb.x, dy: y - gb.y }; return; }
+  if (tool === 'select' && !isEraser(e)) { clearSelection(); selDrag = { x0: x, y0: y, x, y }; return; }
   if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
     if (isEraser(e)) { current = { erase: true }; eraseAt(x, y); return; }
     if (tool === 'laser') { current = { laser: true }; laserPoint(x, y, true); pend.lz.push([r1(x), r1(y), 1]); schedFlush(); return; }
@@ -354,6 +471,9 @@ canvas.addEventListener('pointermove', e => {
     drag.b.x = Math.max(0, Math.min(x - drag.dx, page.clientWidth - 60));
     drag.b.y = Math.max(GRIP_H, y - drag.dy);
     placeBox(drag.b); layout(); sendBox(drag.b);
+  } else if (selDrag) {
+    [selDrag.x, selDrag.y] = pos(e);
+    placeSelRect(normRect(selDrag));
   } else if (current && (e.pointerType === 'pen' || e.pointerType === 'mouse')) {
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     for (const ev of (evs.length ? evs : [e])) {
@@ -376,6 +496,7 @@ canvas.addEventListener('pointermove', e => {
 });
 function end(e) {
   if (VIEWER) return;
+  if (selDrag) { finishSelect(); return; }
   flushPend(); pend.sp = null;
   if (drag) { drag = null; save(); }
   if (current) { if (current.pts) save(); current = null; }
@@ -388,14 +509,21 @@ canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 
 // ---------- UI ----------
-const TOOLS = { pen: 'btnPen', marker: 'btnMarker', laser: 'btnLaser', eraser: 'btnEraser' };
+const TOOLS = { pen: 'btnPen', marker: 'btnMarker', laser: 'btnLaser', eraser: 'btnEraser', select: 'btnSelect' };
 function setTool(t) {
-  tool = t;
+  tool = t; pasteArmed = false;
+  if (t !== 'select') clearSelection();
   for (const k in TOOLS) $(TOOLS[k]).classList.toggle('on', k === t);
 }
 for (const k in TOOLS) $(TOOLS[k]).onclick = () => setTool(k);
+$('selBar').addEventListener('click', e => { const a = e.target.dataset && e.target.dataset.a; if (a) selAction(a); });
+$('btnPaste').onclick = () => { if (appClip) { pasteArmed = true; toast('Toque onde quer colar'); } };
+$('btnUndo').onclick = () => { const f = undoStack.pop(); if (f) f(); $('btnUndo').disabled = !undoStack.length; };
 $('btnKb').onclick = () => newBoxAt(16, scroller.scrollTop + 32);
-$('btnClear').onclick = () => { if (confirm('Apagar todos os desenhos? (o texto fica)')) { strokes = []; redraw(); save(); emit('clr', {}); } };
+$('btnClear').onclick = () => { if (confirm('Apagar todos os desenhos? (o texto fica)')) {
+  const old = strokes; strokes = []; clearSelection(); save(); emit('clr', {});
+  pushUndo(() => { strokes = old.concat(strokes); redraw(); save(); old.forEach(st => emit('sb', pubStroke(st))); });
+} };
 
 // ---------- Supabase Realtime (Broadcast) ----------
 // Protocolo Phoenix (JSON v1), o mesmo que o supabase-js usa; sem dependências.
